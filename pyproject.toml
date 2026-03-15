@@ -4,4 +4,21 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "haversine>=2.9.0",
+    "httpx>=0.28.1",
+    "numpy>=2.4.3",
+    "rasterio>=1.5.0",
+    "tqdm>=4.67.3",
+]
+
+[tool.pytest.ini_options]
+markers = ["live: marks tests that hit the real network (skipped by default)"]
+addopts = "-m 'not live'"
+pythonpath = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "respx>=0.22.0",
+]
