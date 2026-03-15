@@ -4,18 +4,25 @@ Pipeline orchestration for the parkrun elevation dataset.
 Entry point: run()
 Inner loop:  process_event()
 
-Build order per event:
+Route acquisition cascade per event:
+    1. OSM (Overpass)       — match_relation() against bulk pre-fetched data
+    2. Google My Maps KML   — get_kml_route() fetches course page + KML
+    3. no_route             — write placeholder, retry after 30 days
+
+Elevation build order per event:
     1. Cache check          — skip if already known (idempotent)
     2. Write "pending"      — crash recovery marker
-    3. OSM route lookup     — match_relation() against bulk Overpass data
+    3. Route lookup         — OSM → KML cascade
     4. Elevation profile    — compute_elevation_profile() via SRTM
-    5. Write final record   — "complete" or "no_route"
+    5. Apply lap multiply   — ascent/descent × laps for multi-lap courses
+    6. Write final record   — "complete" or "no_route"
 """
 
 import datetime
 import logging
 from pathlib import Path
 
+import numpy as np
 from tqdm import tqdm
 
 from .cache import Cache
@@ -28,6 +35,7 @@ from .routes import (
     fetch_overpass,
     match_relation,
 )
+from .routes_kml import get_kml_route
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +43,37 @@ _SRTM_DIR = Path("srtm")
 _CACHE_PATH = Path("data/elevation/uk.json")
 
 
+def _apply_laps(elevation_data: dict, route_type: str, laps: int) -> dict:
+    """Scale ascent/descent for multi-lap courses.
+
+    - loop:         multiply total_ascent_m and total_descent_m by laps
+    - out_and_back: one lap = out + back, so ascent_total = ascent + descent
+                    (the return leg is the outward leg reversed)
+    - unknown:      treat as loop, add laps_inferred flag
+    """
+    if laps == 1 or route_type not in ("loop", "out_and_back", "unknown"):
+        return elevation_data
+
+    data = dict(elevation_data)
+
+    if route_type == "out_and_back":
+        # Return leg has swapped ascent/descent — sum both directions
+        total = data["total_ascent_m"] + data["total_descent_m"]
+        data["total_ascent_m"] = round(total, 1)
+        data["total_descent_m"] = round(total, 1)
+    else:
+        # loop or unknown: straight multiply
+        data["total_ascent_m"] = round(data["total_ascent_m"] * laps, 1)
+        data["total_descent_m"] = round(data["total_descent_m"] * laps, 1)
+
+    data["distance_m"] = round(data["distance_m"] * laps, 1)
+
+    return data
+
+
 def process_event(
     event: dict,
-    osm_result: dict | None,
+    route: dict | None,
     srtm_dir: Path,
     cache: Cache,
     dry_run: bool = False,
@@ -46,11 +82,12 @@ def process_event(
 
     Parameters
     ----------
-    event:      event dict from get_uk_events()
-    osm_result: return value of match_relation(), or None if no route found
-    srtm_dir:   path to the local SRTM tile cache
-    cache:      Cache instance (written unless dry_run=True)
-    dry_run:    if True, compute everything but do not write to cache
+    event:    event dict from get_uk_events()
+    route:    resolved route dict (keys: coords, source_type, source_id,
+              source_url, laps, route_type, laps_inferred) or None
+    srtm_dir: path to the local SRTM tile cache
+    cache:    Cache instance (written unless dry_run=True)
+    dry_run:  if True, compute everything but do not write to cache
 
     Returns the status string: "complete" or "no_route".
     """
@@ -65,36 +102,87 @@ def process_event(
         "date_computed": today,
     }
 
-    if osm_result is None:
+    if route is None:
         record = {**base, "status": "no_route"}
         if not dry_run:
             cache.upsert(record)
         return "no_route"
 
-    coords = osm_result["coords"]
-    relation = osm_result["relation"]
-    relation_id = relation["id"]
+    coords = route["coords"]
+    threshold = 3.0
 
     elevation_data = compute_elevation_profile(
         lats=[c[0] for c in coords],
         lngs=[c[1] for c in coords],
         srtm_dir=srtm_dir,
-        threshold=3.0,
+        threshold=threshold,
     )
+
+    laps = route.get("laps", 1)
+    route_type = route.get("route_type", "loop")
+    elevation_data = _apply_laps(elevation_data, route_type, laps)
 
     record = {
         **base,
         "status": "complete",
-        "route_source_type": "osm",
-        "route_source_id": f"relation/{relation_id}",
-        "route_source_url": f"https://www.openstreetmap.org/relation/{relation_id}",
+        "route_source_type": route["source_type"],
+        "route_source_id": route["source_id"],
+        "route_source_url": route["source_url"],
+        "laps": laps,
+        "route_type": route_type,
         **elevation_data,
     }
+
+    if route.get("laps_inferred"):
+        record["laps_inferred"] = True
 
     if not dry_run:
         cache.upsert(record)
 
     return "complete"
+
+
+def _resolve_route(
+    event: dict,
+    relations: list,
+    way_lookup: dict,
+    node_lookup: dict,
+) -> dict | None:
+    """Try OSM first, fall back to Google My Maps KML.
+
+    Returns a normalised route dict with keys:
+        coords, laps, route_type, laps_inferred,
+        source_type, source_id, source_url
+    """
+    # --- OSM ---
+    osm = match_relation(event, relations, way_lookup, node_lookup)
+    if osm is not None:
+        rel_id = osm["relation"]["id"]
+        return {
+            "coords": osm["coords"],
+            "laps": 1,
+            "route_type": "loop",
+            "laps_inferred": False,
+            "source_type": "osm",
+            "source_id": f"relation/{rel_id}",
+            "source_url": f"https://www.openstreetmap.org/relation/{rel_id}",
+        }
+
+    # --- Google My Maps KML ---
+    kml = get_kml_route(event)
+    if kml is not None:
+        slug = event["event_name"]
+        return {
+            "coords": kml["coords"],
+            "laps": kml["laps"],
+            "route_type": kml["route_type"],
+            "laps_inferred": kml.get("laps_inferred", False),
+            "source_type": "parkrun_kml",
+            "source_id": f"googlemymaps/{kml['mid']}",
+            "source_url": f"https://www.parkrun.org.uk/{slug}/course/",
+        }
+
+    return None
 
 
 def run(
@@ -160,8 +248,8 @@ def run(
                 "date_computed": datetime.date.today().isoformat(),
             })
 
-        osm_result = match_relation(event, relations, way_lookup, node_lookup)
-        status = process_event(event, osm_result, srtm_dir, cache, dry_run=dry_run)
+        route = _resolve_route(event, relations, way_lookup, node_lookup)
+        status = process_event(event, route, srtm_dir, cache, dry_run=dry_run)
 
         if status == "complete":
             n_complete += 1
@@ -169,12 +257,7 @@ def run(
             n_no_route += 1
 
         processed += 1
-        logger.info(
-            "[%d] %s → %s",
-            processed,
-            name,
-            status,
-        )
+        logger.info("[%d] %s → %s", processed, name, status)
 
     logger.info(
         "Done. complete=%d  no_route=%d  skipped=%d",
