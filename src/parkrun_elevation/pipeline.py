@@ -194,6 +194,7 @@ def run(
     limit: int | None = None,
     dry_run: bool = False,
     show_progress: bool = False,
+    retry_no_route: bool = False,
 ) -> None:
     """Run the UK elevation pipeline.
 
@@ -207,6 +208,7 @@ def run(
     limit:            stop after processing this many events (for testing)
     dry_run:          compute but do not write to cache or disk
     show_progress:    display a tqdm progress bar (set False in tests)
+    retry_no_route:   reprocess events whose cached status is \"no_route\"
     """
     events = get_uk_events(refresh=refresh_events)
     logger.info("Loaded %d UK events", len(events))
@@ -230,7 +232,12 @@ def run(
 
         name = event["event_name"]
 
-        if cache.is_known(name) and force != name:
+        skip = cache.is_known(name) and force != name
+        if skip and retry_no_route:
+            rec = cache.get_record(name)
+            if rec and rec.get("status") == "no_route":
+                skip = False
+        if skip:
             n_skipped += 1
             logger.debug("Skipping %s (already known)", name)
             continue

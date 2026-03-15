@@ -19,9 +19,15 @@ def test_defaults():
     assert args.dry_run is False
     assert args.refresh_events is False
     assert args.refresh_overpass is False
+    assert args.retry_no_route is False
     assert args.srtm_dir == Path("srtm")
     assert args.cache_path == Path("data/elevation/uk.json")
     assert args.verbose is False
+
+
+def test_retry_no_route():
+    args = parse_args(["--retry-no-route"])
+    assert args.retry_no_route is True
 
 
 def test_force():
@@ -81,6 +87,7 @@ def test_main_default_call(mock_run):
         limit=None,
         dry_run=False,
         show_progress=True,
+        retry_no_route=False,
     )
 
 
@@ -104,4 +111,5 @@ def test_main_passes_all_flags(mock_run):
         limit=3,
         dry_run=True,
         show_progress=True,
+        retry_no_route=False,
     )

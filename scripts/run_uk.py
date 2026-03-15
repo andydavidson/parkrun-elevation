@@ -77,6 +77,11 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Output JSON file path (default: data/elevation/uk.json).",
     )
     parser.add_argument(
+        "--retry-no-route",
+        action="store_true",
+        help="Reprocess events whose cached status is 'no_route'.",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable DEBUG-level logging.",
@@ -102,6 +107,7 @@ def main(argv=None) -> None:
         limit=args.limit,
         dry_run=args.dry_run,
         show_progress=True,
+        retry_no_route=args.retry_no_route,
     )
 
 

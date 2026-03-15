@@ -304,6 +304,50 @@ def test_run_dry_run_does_not_write(patched_run_deps):
     assert not d["cache_path"].exists()
 
 
+def test_run_retries_no_route_when_flag_set(patched_run_deps, monkeypatch):
+    d = patched_run_deps
+    cache = Cache(d["cache_path"])
+    cache.upsert({
+        "event_name": "alpha", "event_long_name": "Alpha parkrun",
+        "country_code": 97, "lat": 52.0, "lng": 1.0,
+        "status": "no_route", "date_computed": datetime.date.today().isoformat(),
+    })
+
+    processed = []
+    from parkrun_elevation.pipeline import process_event as _real_process
+
+    def tracking_process(event, route, srtm_dir, cache, dry_run=False):
+        processed.append(event["event_name"])
+        return _real_process(event, route, srtm_dir, cache, dry_run=dry_run)
+
+    monkeypatch.setattr("parkrun_elevation.pipeline.process_event", tracking_process)
+    run(srtm_dir=d["srtm_dir"], cache_path=d["cache_path"], retry_no_route=True)
+
+    assert "alpha" in processed
+
+
+def test_run_does_not_retry_no_route_by_default(patched_run_deps, monkeypatch):
+    d = patched_run_deps
+    cache = Cache(d["cache_path"])
+    cache.upsert({
+        "event_name": "alpha", "event_long_name": "Alpha parkrun",
+        "country_code": 97, "lat": 52.0, "lng": 1.0,
+        "status": "no_route", "date_computed": datetime.date.today().isoformat(),
+    })
+
+    processed = []
+    from parkrun_elevation.pipeline import process_event as _real_process
+
+    def tracking_process(event, route, srtm_dir, cache, dry_run=False):
+        processed.append(event["event_name"])
+        return _real_process(event, route, srtm_dir, cache, dry_run=dry_run)
+
+    monkeypatch.setattr("parkrun_elevation.pipeline.process_event", tracking_process)
+    run(srtm_dir=d["srtm_dir"], cache_path=d["cache_path"])
+
+    assert "alpha" not in processed
+
+
 def test_run_pending_written_before_elevation(patched_run_deps, monkeypatch):
     d = patched_run_deps
     pending_seen = []
